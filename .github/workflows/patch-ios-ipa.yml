@@ -7,10 +7,19 @@ on:
         description: Direct URL to the original .ipa file
         required: true
         default: https://github.com/zeas2/Kirikiroid2/releases/download/1.3.9/Kirikiroid2_1.3.9.ipa
+      patched_ipa_name:
+        description: Output patched IPA filename
+        required: true
+        default: Kirikiroid2_Patched.ipa
+      artifact_name:
+        description: Uploaded artifact name
+        required: true
+        default: Kirikiroid2_Patched_IPA
 
 jobs:
   patch-ipa:
     runs-on: macos-latest
+    permissions: {}
 
     steps:
       - name: Download the .ipa file
@@ -55,10 +64,10 @@ jobs:
         run: |
           set -euo pipefail
           # Zip the Payload folder back up.
-          zip -qr Kirikiroid2_Patched.ipa Payload
+          zip -qr "${{ github.event.inputs.patched_ipa_name }}" Payload
 
       - name: Upload patched .ipa artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Kirikiroid2_Patched_IPA
-          path: Kirikiroid2_Patched.ipa
+          name: ${{ github.event.inputs.artifact_name }}
+          path: ${{ github.event.inputs.patched_ipa_name }}
