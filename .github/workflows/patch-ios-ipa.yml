@@ -23,6 +23,7 @@ jobs:
     env:
       IPA_URL: ${{ github.event.inputs.ipa_url }}
       PATCHED_IPA_NAME: ${{ github.event.inputs.patched_ipa_name }}
+      ARTIFACT_NAME: ${{ github.event.inputs.artifact_name }}
 
     steps:
       - name: Download the .ipa file
@@ -84,11 +85,21 @@ jobs:
             echo "Invalid patched_ipa_name. Allowed characters: letters, numbers, dot, underscore, dash; must end with .ipa."
             exit 1
           fi
+          case "$ARTIFACT_NAME" in
+            */*|*..*|"")
+              echo "Invalid artifact_name. Use a simple artifact label without path components."
+              exit 1
+              ;;
+          esac
+          if ! [[ "$ARTIFACT_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid artifact_name. Allowed characters: letters, numbers, dot, underscore, dash."
+            exit 1
+          fi
           # Zip the Payload folder back up.
           zip -qr "$PATCHED_IPA_NAME" Payload
 
       - name: Upload patched .ipa artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.artifact_name }}
+          name: ${{ env.ARTIFACT_NAME }}
           path: ${{ env.PATCHED_IPA_NAME }}
