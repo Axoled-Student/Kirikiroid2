@@ -19,7 +19,9 @@ on:
 jobs:
   patch-ipa:
     runs-on: macos-latest
-    permissions: {}
+    permissions:
+      contents: read
+      actions: write
     env:
       IPA_URL: ${{ github.event.inputs.ipa_url }}
       PATCHED_IPA_NAME: ${{ github.event.inputs.patched_ipa_name }}
@@ -30,7 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$IPA_URL" in
-            https://github.com/*.ipa|https://github.com/*.ipa?*|https://github.com/*.ipa#*)
+            https://github.com/*.ipa)
               ;;
             *)
               echo "Invalid ipa_url. It must be an https://github.com URL pointing to an .ipa file."
@@ -50,6 +52,11 @@ jobs:
       - name: Unzip the .ipa file
         run: |
           set -euo pipefail
+          if ! python3 -c 'from pathlib import Path; import sys; sys.exit(0 if Path("original.ipa").read_bytes()[:4] == b"PK\x03\x04" else 1)'
+          then
+            echo "Downloaded file is not a valid ZIP/IPA signature."
+            exit 1
+          fi
           # An .ipa is just a zip archive. Unzipping it extracts the 'Payload' folder.
           unzip -q original.ipa
 
