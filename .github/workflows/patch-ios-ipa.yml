@@ -52,23 +52,24 @@ jobs:
       - name: Unzip the .ipa file
         run: |
           set -euo pipefail
-          if ! python3 -c 'from pathlib import Path; import sys; sys.exit(0 if Path("original.ipa").read_bytes()[:4] == b"PK\x03\x04" else 1)'
-          then
-            echo "Downloaded file is not a valid ZIP/IPA signature."
-            exit 1
-          fi
+          unzip -tq original.ipa >/dev/null
           # An .ipa is just a zip archive. Unzipping it extracts the 'Payload' folder.
           unzip -q original.ipa
 
       - name: Modify Info.plist using plutil
         run: |
           set -euo pipefail
-          # Locate the .app directory dynamically to ensure the path is correct.
-          APP_DIR="$(find Payload -type d -name '*.app' | head -n 1)"
-          if [ -z "$APP_DIR" ]; then
+          # Locate the .app directory dynamically and ensure exactly one app bundle exists.
+          mapfile -t APP_DIRS < <(find Payload -type d -name '*.app')
+          if [ "${#APP_DIRS[@]}" -eq 0 ]; then
             echo "No .app bundle found in Payload."
             exit 1
           fi
+          if [ "${#APP_DIRS[@]}" -gt 1 ]; then
+            echo "Multiple .app bundles found in Payload; refusing to pick one implicitly."
+            exit 1
+          fi
+          APP_DIR="${APP_DIRS[0]}"
 
           PLIST_PATH="$APP_DIR/Info.plist"
           if [ ! -f "$PLIST_PATH" ]; then
