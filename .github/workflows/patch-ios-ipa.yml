@@ -30,14 +30,22 @@ jobs:
         run: |
           set -euo pipefail
           case "$IPA_URL" in
-            https://*.ipa|https://*.ipa?*|https://*.ipa#*)
+            https://github.com/*.ipa|https://github.com/*.ipa?*|https://github.com/*.ipa#*)
               ;;
             *)
-              echo "Invalid ipa_url. It must be an https URL pointing to an .ipa file."
+              echo "Invalid ipa_url. It must be an https://github.com URL pointing to an .ipa file."
               exit 1
               ;;
           esac
-          curl -fL -o original.ipa "$IPA_URL"
+          FINAL_URL="$(curl -fLsS --proto '=https' --tlsv1.2 -o original.ipa -w '%{url_effective}' "$IPA_URL")"
+          case "$FINAL_URL" in
+            https://github.com/*|https://objects.githubusercontent.com/*|https://*.githubusercontent.com/*)
+              ;;
+            *)
+              echo "Invalid redirect destination: $FINAL_URL"
+              exit 1
+              ;;
+          esac
 
       - name: Unzip the .ipa file
         run: |
