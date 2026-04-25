@@ -20,12 +20,23 @@ jobs:
   patch-ipa:
     runs-on: macos-latest
     permissions: {}
+    env:
+      IPA_URL: ${{ github.event.inputs.ipa_url }}
+      PATCHED_IPA_NAME: ${{ github.event.inputs.patched_ipa_name }}
 
     steps:
       - name: Download the .ipa file
         run: |
           set -euo pipefail
-          curl -fL -o original.ipa "${{ github.event.inputs.ipa_url }}"
+          case "$IPA_URL" in
+            https://*.ipa|https://*.ipa?*|https://*.ipa#*)
+              ;;
+            *)
+              echo "Invalid ipa_url. It must be an https URL pointing to an .ipa file."
+              exit 1
+              ;;
+          esac
+          curl -fL -o original.ipa "$IPA_URL"
 
       - name: Unzip the .ipa file
         run: |
@@ -63,11 +74,21 @@ jobs:
       - name: Repackage into a new .ipa
         run: |
           set -euo pipefail
+          case "$PATCHED_IPA_NAME" in
+            */*|*..*|"")
+              echo "Invalid patched_ipa_name. Use a filename only, without path components."
+              exit 1
+              ;;
+          esac
+          if ! [[ "$PATCHED_IPA_NAME" =~ ^[A-Za-z0-9._-]+\.ipa$ ]]; then
+            echo "Invalid patched_ipa_name. Allowed characters: letters, numbers, dot, underscore, dash; must end with .ipa."
+            exit 1
+          fi
           # Zip the Payload folder back up.
-          zip -qr "${{ github.event.inputs.patched_ipa_name }}" Payload
+          zip -qr "$PATCHED_IPA_NAME" Payload
 
       - name: Upload patched .ipa artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.inputs.artifact_name }}
-          path: ${{ github.event.inputs.patched_ipa_name }}
+          path: ${{ env.PATCHED_IPA_NAME }}
