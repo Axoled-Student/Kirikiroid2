@@ -1,0 +1,64 @@
+name: Patch iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: Direct URL to the original .ipa file
+        required: true
+        default: https://github.com/zeas2/Kirikiroid2/releases/download/1.3.9/Kirikiroid2_1.3.9.ipa
+
+jobs:
+  patch-ipa:
+    runs-on: macos-latest
+
+    steps:
+      - name: Download the .ipa file
+        run: |
+          set -euo pipefail
+          curl -fL -o original.ipa "${{ github.event.inputs.ipa_url }}"
+
+      - name: Unzip the .ipa file
+        run: |
+          set -euo pipefail
+          # An .ipa is just a zip archive. Unzipping it extracts the 'Payload' folder.
+          unzip -q original.ipa
+
+      - name: Modify Info.plist using plutil
+        run: |
+          set -euo pipefail
+          # Locate the .app directory dynamically to ensure the path is correct.
+          APP_DIR="$(find Payload -type d -name '*.app' | head -n 1)"
+          if [ -z "$APP_DIR" ]; then
+            echo "No .app bundle found in Payload."
+            exit 1
+          fi
+
+          PLIST_PATH="$APP_DIR/Info.plist"
+          if [ ! -f "$PLIST_PATH" ]; then
+            echo "Info.plist not found at: $PLIST_PATH"
+            exit 1
+          fi
+
+          echo "Found Info.plist at: $PLIST_PATH"
+
+          # Insert or update the required boolean keys for file sharing.
+          plutil -replace UIFileSharingEnabled -bool YES "$PLIST_PATH"
+          plutil -replace UISupportsDocumentBrowser -bool YES "$PLIST_PATH"
+
+          # Print the keys to the console to verify successful modification.
+          echo "Verification:"
+          plutil -extract UIFileSharingEnabled xml1 -o - "$PLIST_PATH"
+          plutil -extract UISupportsDocumentBrowser xml1 -o - "$PLIST_PATH"
+
+      - name: Repackage into a new .ipa
+        run: |
+          set -euo pipefail
+          # Zip the Payload folder back up.
+          zip -qr Kirikiroid2_Patched.ipa Payload
+
+      - name: Upload patched .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kirikiroid2_Patched_IPA
+          path: Kirikiroid2_Patched.ipa
