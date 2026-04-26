@@ -1,0 +1,121 @@
+name: Patch iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: Direct URL to the original .ipa file
+        required: true
+        default: https://github.com/zeas2/Kirikiroid2/releases/download/1.3.9/Kirikiroid2_1.3.9.ipa
+      patched_ipa_name:
+        description: Output patched IPA filename
+        required: true
+        default: Kirikiroid2_Patched.ipa
+      artifact_name:
+        description: Uploaded artifact name
+        required: true
+        default: Kirikiroid2_Patched_IPA
+
+jobs:
+  patch-ipa:
+    runs-on: macos-latest
+    permissions:
+      contents: read
+      actions: write
+    env:
+      IPA_URL: ${{ github.event.inputs.ipa_url }}
+      PATCHED_IPA_NAME: ${{ github.event.inputs.patched_ipa_name }}
+      ARTIFACT_NAME: ${{ github.event.inputs.artifact_name }}
+
+    steps:
+      - name: Download the .ipa file
+        run: |
+          set -euo pipefail
+          case "$IPA_URL" in
+            https://github.com/*.ipa)
+              ;;
+            *)
+              echo "Invalid ipa_url. It must be an https://github.com URL pointing to an .ipa file."
+              exit 1
+              ;;
+          esac
+          FINAL_URL="$(curl -fLsS --proto '=https' --tlsv1.2 -o original.ipa -w '%{url_effective}' "$IPA_URL")"
+          case "$FINAL_URL" in
+            https://github.com/*|https://objects.githubusercontent.com/*|https://*.githubusercontent.com/*)
+              ;;
+            *)
+              echo "Invalid redirect destination: $FINAL_URL"
+              exit 1
+              ;;
+          esac
+
+      - name: Unzip the .ipa file
+        run: |
+          set -euo pipefail
+          unzip -tq original.ipa >/dev/null
+          # An .ipa is just a zip archive. Unzipping it extracts the 'Payload' folder.
+          unzip -q original.ipa
+
+      - name: Modify Info.plist using plutil
+        run: |
+          set -euo pipefail
+          # Locate the .app directory dynamically and ensure exactly one app bundle exists.
+          mapfile -t APP_DIRS < <(find Payload -type d -name '*.app')
+          if [ "${#APP_DIRS[@]}" -eq 0 ]; then
+            echo "No .app bundle found in Payload."
+            exit 1
+          fi
+          if [ "${#APP_DIRS[@]}" -gt 1 ]; then
+            echo "Multiple .app bundles found in Payload; refusing to pick one implicitly."
+            exit 1
+          fi
+          APP_DIR="${APP_DIRS[0]}"
+
+          PLIST_PATH="$APP_DIR/Info.plist"
+          if [ ! -f "$PLIST_PATH" ]; then
+            echo "Info.plist not found at: $PLIST_PATH"
+            exit 1
+          fi
+
+          echo "Found Info.plist at: $PLIST_PATH"
+
+          # Insert or update the required boolean keys for file sharing.
+          plutil -replace UIFileSharingEnabled -bool YES "$PLIST_PATH"
+          plutil -replace UISupportsDocumentBrowser -bool YES "$PLIST_PATH"
+
+          # Print the keys to the console to verify successful modification.
+          echo "Verification:"
+          plutil -extract UIFileSharingEnabled xml1 -o - "$PLIST_PATH"
+          plutil -extract UISupportsDocumentBrowser xml1 -o - "$PLIST_PATH"
+
+      - name: Repackage into a new .ipa
+        run: |
+          set -euo pipefail
+          case "$PATCHED_IPA_NAME" in
+            */*|*..*|"")
+              echo "Invalid patched_ipa_name. Use a filename only, without path components."
+              exit 1
+              ;;
+          esac
+          if ! [[ "$PATCHED_IPA_NAME" =~ ^[A-Za-z0-9._-]+\.ipa$ ]]; then
+            echo "Invalid patched_ipa_name. Allowed characters: letters, numbers, dot, underscore, dash; must end with .ipa."
+            exit 1
+          fi
+          case "$ARTIFACT_NAME" in
+            */*|*..*|"")
+              echo "Invalid artifact_name. Use a simple artifact label without path components."
+              exit 1
+              ;;
+          esac
+          if ! [[ "$ARTIFACT_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "Invalid artifact_name. Allowed characters: letters, numbers, dot, underscore, dash."
+            exit 1
+          fi
+          # Zip the Payload folder back up.
+          zip -qr "$PATCHED_IPA_NAME" Payload
+
+      - name: Upload patched .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.PATCHED_IPA_NAME }}
