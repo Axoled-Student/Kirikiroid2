@@ -667,6 +667,11 @@ void TVPBaseFileSelectorForm::onDeleteClicked(cocos2d::Ref *owner)
 {
 	LocaleConfigManager *localeMgr = LocaleConfigManager::GetInstance();
 	std::string content;
+	std::vector<std::string> targets;
+	targets.reserve(_selectedFileIndex.size());
+	for (int idx : _selectedFileIndex) {
+		targets.emplace_back(CurrentDirList[idx].FullPath);
+	}
 	if (_selectedFileIndex.size() == 1) {
 		const FileInfo &info = CurrentDirList[*_selectedFileIndex.begin()];
 		content = info.FullPath;
@@ -676,14 +681,17 @@ void TVPBaseFileSelectorForm::onDeleteClicked(cocos2d::Ref *owner)
 		snprintf(tmp, 64, content.c_str(), _selectedFileIndex.size());
 		content = tmp;
 	}
-	if (TVPShowSimpleMessageBoxYesNo(content, localeMgr->GetText("ensure_to_delete_file")) == 0) {
-		for (int idx : _selectedFileIndex) {
-			TVPDeleteFile(CurrentDirList[idx].FullPath);
+	TVPMessageBoxForm::showYesNo(localeMgr->GetText("ensure_to_delete_file"), content,
+		[this, targets](int result) {
+		if (result == 0) {
+			for (const std::string &path : targets) {
+				TVPDeleteFile(path);
+			}
+			scheduleOnce([this](float) {
+				ListDir(CurrentPath);
+			}, 0, "refresh_path");
 		}
-		scheduleOnce([this](float) {
-			ListDir(CurrentPath);
-		}, 0, "refresh_path");
-	}
+	});
 }
 
 void TVPBaseFileSelectorForm::onSendToClicked(cocos2d::Ref *owner)
@@ -970,6 +978,12 @@ void TVPBaseFileSelectorForm::FileItemCellImpl::initFromFile(const char * filena
 						}, 0, "delay_call");
 					}
 				}, 1.0f, str_long_press);
+				break;
+			case Widget::TouchEventType::ENDED:
+				if (sender->isScheduled(str_long_press)) {
+					sender->unschedule(str_long_press);
+					_owner->onClicked();
+				}
 				break;
 			case Widget::TouchEventType::CANCELED:
 				sender->unschedule(str_long_press);

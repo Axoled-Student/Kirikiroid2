@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Bypass blocked iOS native dialogs in the upstream IPA.
+Bypass blocked iOS native dialogs and broken touch callbacks in the upstream IPA.
 
 The IPA is prebuilt, so source changes alone do not affect the artifact produced
 by this workflow. This script patches the arm64 Mach-O instruction that branches
 into the specific native alert block which loads "archive_repack_no_xp3filter",
 and patches the New Folder menu action to accept its default name without showing
-the frozen native text prompt. Other message boxes and yes/no dialogs are left
-untouched.
+the frozen native text prompt. It also patches the file-list click guard that
+drops normal taps after iOS clears the long-press timer, and removes the native
+delete confirmation path that freezes the app.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ NOP_ARM64 = b"\x1f\x20\x03\xd5"
 MOV_W0_ZERO_ARM64 = b"\x00\x00\x80\x52"
 XP3FILTER_KEY = b"archive_repack_no_xp3filter"
 NEW_FOLDER_PROMPT = b"Input name"
+DELETE_CONFIRM_KEY = b"ensure_to_delete_file"
+FILE_ITEM_CSB = b"ui/FileItem.csb"
 
 
 class PatchError(RuntimeError):
@@ -342,6 +345,108 @@ def patch_new_folder_input(data: bytearray, slice_offset: int, slice_size: int, 
     return True
 
 
+def patch_file_item_click_guard(data: bytearray, slice_offset: int, slice_size: int, sections, text_section) -> bool:
+    file_item_offset = bytes(data).find(FILE_ITEM_CSB, slice_offset, slice_offset + slice_size)
+    if file_item_offset < 0:
+        raise PatchError("FileItem CSB path string not found in arm64 slice")
+
+    file_item_slice_offset = file_item_offset - slice_offset
+    file_item_vmaddr = file_offset_to_vmaddr(sections, file_item_slice_offset)
+    xrefs = find_adjacent_string_xrefs(data, slice_offset, text_section, file_item_vmaddr)
+    if len(xrefs) != 1:
+        details = ", ".join(f"0x{xref:x}" for xref in xrefs) or "none"
+        raise PatchError(f"Expected one exact xref to FileItem CSB path; found {details}")
+
+    text_start = slice_offset + text_section["file_offset"]
+    text_vmaddr = text_section["address"]
+    search_start = text_start + (xrefs[0] - text_vmaddr)
+    search_end = min(text_start + text_section["size"] - 8, search_start + 0x2500)
+
+    candidates = []
+    already_patched = []
+    for file_offset in range(search_start, search_end, 4):
+        pc = text_vmaddr + (file_offset - text_start)
+        previous_instruction = read_u32le(data, file_offset - 4)
+        next_instruction = read_u32le(data, file_offset + 4)
+
+        if previous_instruction & 0xFC000000 != 0x94000000:
+            continue
+        if not decode_adrp_target(next_instruction, pc + 4):
+            continue
+
+        existing = bytes(data[file_offset : file_offset + 4])
+        if existing == NOP_ARM64:
+            already_patched.append((file_offset, pc))
+            continue
+
+        decoded = decode_cbz_target(read_u32le(data, file_offset), pc)
+        if not decoded:
+            continue
+        register, target = decoded
+        if register == 0 and target == pc + 0x34:
+            candidates.append((file_offset, pc, target))
+
+    if not candidates and len(already_patched) == 1:
+        _, pc = already_patched[0]
+        print(f"arm64 FileItem click guard already patched at 0x{pc:x}")
+        return False
+
+    if len(candidates) != 1:
+        details = ", ".join(f"0x{pc:x}->0x{target:x}" for _, pc, target in candidates) or "none"
+        raise PatchError(f"Expected one FileItem click guard to patch; found {details}")
+
+    guard_file_offset, guard_vmaddr, target_vmaddr = candidates[0]
+    data[guard_file_offset : guard_file_offset + 4] = NOP_ARM64
+    print(f"Patched arm64 FileItem click guard at 0x{guard_vmaddr:x} targeting 0x{target_vmaddr:x}")
+    return True
+
+
+def patch_delete_confirmation(data: bytearray, slice_offset: int, slice_size: int, sections, text_section) -> bool:
+    key_offset = bytes(data).find(DELETE_CONFIRM_KEY, slice_offset, slice_offset + slice_size)
+    if key_offset < 0:
+        raise PatchError("delete confirmation locale key not found in arm64 slice")
+
+    key_slice_offset = key_offset - slice_offset
+    key_vmaddr = file_offset_to_vmaddr(sections, key_slice_offset)
+    xrefs = find_adjacent_string_xrefs(data, slice_offset, text_section, key_vmaddr)
+    if len(xrefs) != 1:
+        details = ", ".join(f"0x{xref:x}" for xref in xrefs) or "none"
+        raise PatchError(f"Expected one exact xref to delete confirmation key; found {details}")
+
+    text_start = slice_offset + text_section["file_offset"]
+    text_vmaddr = text_section["address"]
+    xref_file_offset = text_start + (xrefs[0] - text_vmaddr)
+    search_end = min(text_start + text_section["size"] - 8, xref_file_offset + 0x120)
+
+    candidates = []
+    already_patched = []
+    for file_offset in range(xref_file_offset, search_end, 4):
+        pc = text_vmaddr + (file_offset - text_start)
+        instruction = read_u32le(data, file_offset)
+        next_instruction = read_u32le(data, file_offset + 4)
+
+        if next_instruction != 0xAA0003F4:  # mov x20, x0
+            continue
+        if bytes(data[file_offset : file_offset + 4]) == MOV_W0_ZERO_ARM64:
+            already_patched.append((file_offset, pc))
+        elif instruction & 0xFC000000 == 0x94000000:
+            candidates.append((file_offset, pc))
+
+    if not candidates and len(already_patched) == 1:
+        _, pc = already_patched[0]
+        print(f"arm64 delete native confirmation already patched at 0x{pc:x}")
+        return False
+
+    if len(candidates) != 1:
+        details = ", ".join(f"0x{pc:x}" for _, pc in candidates) or "none"
+        raise PatchError(f"Expected one delete confirmation call to patch; found {details}")
+
+    call_file_offset, call_vmaddr = candidates[0]
+    data[call_file_offset : call_file_offset + 4] = MOV_W0_ZERO_ARM64
+    print(f"Patched arm64 delete native confirmation call at 0x{call_vmaddr:x}")
+    return True
+
+
 def patch_arm64_slice(data: bytearray, slice_offset: int, slice_size: int) -> bool:
     sections = parse_sections_64(data, slice_offset)
     text_section = find_section(sections, "__text")
@@ -349,6 +454,8 @@ def patch_arm64_slice(data: bytearray, slice_offset: int, slice_size: int) -> bo
     patched = False
     patched = patch_xp3filter_alert(data, slice_offset, slice_size, sections, text_section) or patched
     patched = patch_new_folder_input(data, slice_offset, slice_size, sections, text_section) or patched
+    patched = patch_file_item_click_guard(data, slice_offset, slice_size, sections, text_section) or patched
+    patched = patch_delete_confirmation(data, slice_offset, slice_size, sections, text_section) or patched
     return patched
 
 
