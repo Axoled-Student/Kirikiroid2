@@ -60,7 +60,10 @@ jobs:
         run: |
           set -euo pipefail
           # Locate the .app directory dynamically and ensure exactly one app bundle exists.
-          mapfile -t APP_DIRS < <(find Payload -type d -name '*.app')
+          APP_DIRS=()
+          while IFS= read -r -d '' app_dir; do
+            APP_DIRS+=("$app_dir")
+          done < <(find Payload -type d -name '*.app' -print0)
           if [ "${#APP_DIRS[@]}" -eq 0 ]; then
             echo "No .app bundle found in Payload."
             exit 1
