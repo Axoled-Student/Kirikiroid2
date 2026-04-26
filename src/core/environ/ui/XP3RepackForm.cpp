@@ -324,9 +324,7 @@ void TVPProcessXP3Repack(const std::string &dir)
 	});
 	LocaleConfigManager *locmgr = LocaleConfigManager::GetInstance();
 	if (!hasXp3Filter) {
-		if (TVPShowSimpleMessageBoxYesNo(locmgr->GetText("archive_repack_no_xp3filter"), locmgr->GetText("notice")) != 0) {
-			return;
-		}
+		cocos2d::log("No xp3filter.tjs found in current path; continuing XP3 conversion.");
 	}
 	WalkDir(dir, [&](const ttstr& strpath, tjs_uint64 size) {
 		if (size < 32) return;

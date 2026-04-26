@@ -104,6 +104,16 @@ jobs:
           fi
           python3 .github/scripts/patch_csb_touch.py "$APP_DIR"
 
+      - name: Bypass blocked xp3filter confirmation
+        run: |
+          set -euo pipefail
+          APP_DIR="$(find Payload -type d -name '*.app' -print -quit)"
+          if [ -z "$APP_DIR" ]; then
+            echo "No .app bundle found in Payload."
+            exit 1
+          fi
+          python3 .github/scripts/patch_xp3filter_alert.py "$APP_DIR"
+
       - name: Repackage into a new .ipa
         run: |
           set -euo pipefail
