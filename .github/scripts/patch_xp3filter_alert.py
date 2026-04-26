@@ -26,6 +26,10 @@ CPU_TYPE_ARM64 = 0x0100000C
 LC_SEGMENT_64 = 0x19
 NOP_ARM64 = b"\x1f\x20\x03\xd5"
 MOV_W0_ZERO_ARM64 = b"\x00\x00\x80\x52"
+CMP_W9_TWO_ARM64 = struct.pack("<I", 0x7100093F)
+CMP_W9_THREE_ARM64 = struct.pack("<I", 0x71000D3F)
+MOV_X1_X0_ARM64 = struct.pack("<I", 0xAA0003E1)
+LDR_X0_X8_8_ARM64 = struct.pack("<I", 0xF9400500)
 XP3FILTER_KEY = b"archive_repack_no_xp3filter"
 NEW_FOLDER_PROMPT = b"Input name"
 DELETE_CONFIRM_KEY = b"ensure_to_delete_file"
@@ -183,6 +187,32 @@ def decode_cbz_target(instruction: int, pc: int):
     immediate = sign_extend((instruction >> 5) & 0x7FFFF, 19) << 2
     register = instruction & 0x1F
     return register, pc + immediate
+
+
+def decode_cond_branch_target(instruction: int, pc: int):
+    if instruction & 0xFF000010 != 0x54000000:
+        return None
+    immediate = sign_extend((instruction >> 5) & 0x7FFFF, 19) << 2
+    condition = instruction & 0xF
+    return condition, pc + immediate
+
+
+def encode_branch(base: int, pc: int, target: int) -> bytes:
+    delta = target - pc
+    if delta % 4 != 0:
+        raise PatchError(f"Unaligned branch target: 0x{pc:x}->0x{target:x}")
+    immediate = delta // 4
+    if immediate < -(1 << 25) or immediate >= (1 << 25):
+        raise PatchError(f"Branch target out of range: 0x{pc:x}->0x{target:x}")
+    return struct.pack("<I", base | (immediate & 0x03FFFFFF))
+
+
+def encode_b(pc: int, target: int) -> bytes:
+    return encode_branch(0x14000000, pc, target)
+
+
+def encode_bl(pc: int, target: int) -> bytes:
+    return encode_branch(0x94000000, pc, target)
 
 
 def find_alert_string_xrefs(data: bytes | bytearray, slice_offset: int, text_section, target_vmaddr: int):
@@ -401,6 +431,61 @@ def patch_file_item_click_guard(data: bytearray, slice_offset: int, slice_size: 
     return True
 
 
+def patch_file_item_touch_ended(data: bytearray, slice_offset: int, sections, text_section) -> bool:
+    text_start = slice_offset + text_section["file_offset"]
+    text_end = text_start + text_section["size"]
+    text_vmaddr = text_section["address"]
+
+    candidates = []
+    already_patched = []
+    for file_offset in range(text_start, text_end - 0x70, 4):
+        if read_u32le(data, file_offset) != 0xB9400049:  # ldr w9, [x2]
+            continue
+        cmp_bytes = bytes(data[file_offset + 4 : file_offset + 8])
+        if cmp_bytes not in (CMP_W9_THREE_ARM64, CMP_W9_TWO_ARM64):
+            continue
+        branch_instruction = read_u32le(data, file_offset + 8)
+        decoded_branch = decode_cond_branch_target(branch_instruction, text_vmaddr + (file_offset + 8 - text_start))
+        if not decoded_branch:
+            continue
+        condition, target_vmaddr = decoded_branch
+        if condition != 0:  # b.eq
+            continue
+        if read_u32le(data, file_offset + 12) != 0x35000469:  # cbnz w9, ...
+            continue
+        if read_u32le(data, file_offset + 16) != 0xF9400508:  # ldr x8, [x8, #8]
+            continue
+
+        target_file_offset = text_start + (target_vmaddr - text_vmaddr)
+        old_block = bytes(data[target_file_offset : target_file_offset + 16])
+        patched_block = (
+            MOV_X1_X0_ARM64
+            + LDR_X0_X8_8_ARM64
+            + encode_bl(target_vmaddr + 8, 0x100E23BD8)
+            + encode_b(target_vmaddr + 12, 0x100E2A9D4)
+        )
+
+        if cmp_bytes == CMP_W9_TWO_ARM64 and old_block == patched_block:
+            already_patched.append((file_offset + 4, text_vmaddr + (file_offset + 4 - text_start), target_vmaddr))
+        elif cmp_bytes == CMP_W9_THREE_ARM64 and read_u32le(data, target_file_offset) == 0xF85E83A8:
+            candidates.append((file_offset + 4, text_vmaddr + (file_offset + 4 - text_start), target_file_offset, target_vmaddr, patched_block))
+
+    if not candidates and len(already_patched) == 1:
+        _, cmp_vmaddr, target_vmaddr = already_patched[0]
+        print(f"arm64 FileItem touch-ended fallback already patched at 0x{cmp_vmaddr:x} via 0x{target_vmaddr:x}")
+        return False
+
+    if len(candidates) != 1:
+        details = ", ".join(f"0x{cmp_vmaddr:x}->0x{target_vmaddr:x}" for _, cmp_vmaddr, _, target_vmaddr, _ in candidates) or "none"
+        raise PatchError(f"Expected one FileItem touch-ended fallback to patch; found {details}")
+
+    cmp_file_offset, cmp_vmaddr, target_file_offset, target_vmaddr, patched_block = candidates[0]
+    data[cmp_file_offset : cmp_file_offset + 4] = CMP_W9_TWO_ARM64
+    data[target_file_offset : target_file_offset + 16] = patched_block
+    print(f"Patched arm64 FileItem touch-ended fallback at 0x{cmp_vmaddr:x} via 0x{target_vmaddr:x}")
+    return True
+
+
 def patch_delete_confirmation(data: bytearray, slice_offset: int, slice_size: int, sections, text_section) -> bool:
     key_offset = bytes(data).find(DELETE_CONFIRM_KEY, slice_offset, slice_offset + slice_size)
     if key_offset < 0:
@@ -455,6 +540,7 @@ def patch_arm64_slice(data: bytearray, slice_offset: int, slice_size: int) -> bo
     patched = patch_xp3filter_alert(data, slice_offset, slice_size, sections, text_section) or patched
     patched = patch_new_folder_input(data, slice_offset, slice_size, sections, text_section) or patched
     patched = patch_file_item_click_guard(data, slice_offset, slice_size, sections, text_section) or patched
+    patched = patch_file_item_touch_ended(data, slice_offset, sections, text_section) or patched
     patched = patch_delete_confirmation(data, slice_offset, slice_size, sections, text_section) or patched
     return patched
 
