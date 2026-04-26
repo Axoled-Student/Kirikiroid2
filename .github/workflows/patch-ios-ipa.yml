@@ -88,11 +88,13 @@ jobs:
           # Insert or update the required boolean keys for file sharing.
           plutil -replace UIFileSharingEnabled -bool YES "$PLIST_PATH"
           plutil -replace UISupportsDocumentBrowser -bool YES "$PLIST_PATH"
+          plutil -replace LSSupportsOpeningDocumentsInPlace -bool YES "$PLIST_PATH"
 
           # Print the keys to the console to verify successful modification.
           echo "Verification:"
           plutil -extract UIFileSharingEnabled xml1 -o - "$PLIST_PATH"
           plutil -extract UISupportsDocumentBrowser xml1 -o - "$PLIST_PATH"
+          plutil -extract LSSupportsOpeningDocumentsInPlace xml1 -o - "$PLIST_PATH"
 
       - name: Patch popup selection touch handling
         run: |
@@ -104,7 +106,7 @@ jobs:
           fi
           python3 .github/scripts/patch_csb_touch.py "$APP_DIR"
 
-      - name: Bypass blocked xp3filter confirmation
+      - name: Patch blocked native iOS dialogs
         run: |
           set -euo pipefail
           APP_DIR="$(find Payload -type d -name '*.app' -print -quit)"

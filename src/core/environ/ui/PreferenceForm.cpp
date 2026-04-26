@@ -87,6 +87,8 @@ tPreferenceItemCheckBox::tPreferenceItemCheckBox()
 
 void tPreferenceItemCheckBox::initController(const NodeMap &allNodes) {
 	checkbox = static_cast<CheckBox*>(allNodes.findController("checkbox"));
+	Widget *checkboxPanel = dynamic_cast<Widget*>(allNodes.findController("Panel_5", false));
+	if (checkboxPanel) checkboxPanel->setTouchEnabled(false);
 	checkbox->setSelected(_getter());
 	checkbox->addEventListener([=](Ref*, CheckBox::EventType e) {
 		this->_setter(e == CheckBox::EventType::SELECTED);

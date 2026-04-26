@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Bypass the iOS native "missing xp3filter.tjs" confirmation in the upstream IPA.
+Bypass blocked iOS native dialogs in the upstream IPA.
 
 The IPA is prebuilt, so source changes alone do not affect the artifact produced
 by this workflow. This script patches the arm64 Mach-O instruction that branches
-into the specific native alert block which loads "archive_repack_no_xp3filter".
-Other message boxes and yes/no dialogs are left untouched.
+into the specific native alert block which loads "archive_repack_no_xp3filter",
+and patches the New Folder menu action to accept its default name without showing
+the frozen native text prompt. Other message boxes and yes/no dialogs are left
+untouched.
 """
 
 from __future__ import annotations
@@ -22,7 +24,9 @@ MH_MAGIC_64 = 0xFEEDFACF
 CPU_TYPE_ARM64 = 0x0100000C
 LC_SEGMENT_64 = 0x19
 NOP_ARM64 = b"\x1f\x20\x03\xd5"
+MOV_W0_ZERO_ARM64 = b"\x00\x00\x80\x52"
 XP3FILTER_KEY = b"archive_repack_no_xp3filter"
+NEW_FOLDER_PROMPT = b"Input name"
 
 
 class PatchError(RuntimeError):
@@ -205,6 +209,30 @@ def find_alert_string_xrefs(data: bytes | bytearray, slice_offset: int, text_sec
     return xrefs
 
 
+def find_adjacent_string_xrefs(data: bytes | bytearray, slice_offset: int, text_section, target_vmaddr: int):
+    text_start = slice_offset + text_section["file_offset"]
+    text_end = text_start + text_section["size"]
+    text_vmaddr = text_section["address"]
+    target_page = target_vmaddr & ~0xFFF
+    target_page_offset = target_vmaddr & 0xFFF
+    xrefs = []
+
+    for file_offset in range(text_start, text_end - 8, 4):
+        instruction = read_u32le(data, file_offset)
+        pc = text_vmaddr + (file_offset - text_start)
+        decoded = decode_adrp_target(instruction, pc)
+        if not decoded:
+            continue
+        register, page = decoded
+        if page != target_page:
+            continue
+        next_instruction = read_u32le(data, file_offset + 4)
+        if is_add_same_register_immediate(next_instruction, register, target_page_offset):
+            xrefs.append(pc)
+
+    return xrefs
+
+
 def find_alert_entry_branch(data: bytes | bytearray, slice_offset: int, text_section, xref_vmaddr: int):
     text_start = slice_offset + text_section["file_offset"]
     text_vmaddr = text_section["address"]
@@ -243,10 +271,7 @@ def find_alert_entry_branch(data: bytes | bytearray, slice_offset: int, text_sec
     return candidates[0]
 
 
-def patch_arm64_slice(data: bytearray, slice_offset: int, slice_size: int) -> bool:
-    sections = parse_sections_64(data, slice_offset)
-    text_section = find_section(sections, "__text")
-
+def patch_xp3filter_alert(data: bytearray, slice_offset: int, slice_size: int, sections, text_section) -> bool:
     key_offset = bytes(data).find(XP3FILTER_KEY, slice_offset, slice_offset + slice_size)
     if key_offset < 0:
         raise PatchError("xp3filter alert locale key not found in arm64 slice")
@@ -271,6 +296,60 @@ def patch_arm64_slice(data: bytearray, slice_offset: int, slice_size: int) -> bo
     target_text = f" targeting 0x{target_vmaddr:x}" if target_vmaddr is not None else ""
     print(f"Patched arm64 xp3filter alert branch at 0x{branch_vmaddr:x}{target_text}")
     return True
+
+
+def patch_new_folder_input(data: bytearray, slice_offset: int, slice_size: int, sections, text_section) -> bool:
+    prompt_offset = bytes(data).find(NEW_FOLDER_PROMPT, slice_offset, slice_offset + slice_size)
+    if prompt_offset < 0:
+        raise PatchError("New Folder input prompt string not found in arm64 slice")
+
+    prompt_slice_offset = prompt_offset - slice_offset
+    prompt_vmaddr = file_offset_to_vmaddr(sections, prompt_slice_offset)
+    xrefs = find_adjacent_string_xrefs(data, slice_offset, text_section, prompt_vmaddr)
+    if len(xrefs) != 1:
+        details = ", ".join(f"0x{xref:x}" for xref in xrefs) or "none"
+        raise PatchError(f"Expected one exact xref to New Folder input prompt; found {details}")
+
+    text_start = slice_offset + text_section["file_offset"]
+    text_vmaddr = text_section["address"]
+    xref_file_offset = text_start + (xrefs[0] - text_vmaddr)
+    search_end = min(text_start + text_section["size"] - 8, xref_file_offset + 0x80)
+
+    candidates = []
+    already_patched = []
+    for file_offset in range(xref_file_offset, search_end, 4):
+        instruction = read_u32le(data, file_offset)
+        next_instruction = read_u32le(data, file_offset + 4)
+        pc = text_vmaddr + (file_offset - text_start)
+
+        if bytes(data[file_offset : file_offset + 4]) == MOV_W0_ZERO_ARM64 and next_instruction == 0xAA0003F4:
+            already_patched.append((file_offset, pc))
+        elif instruction & 0xFC000000 == 0x94000000 and next_instruction == 0xAA0003F4:
+            candidates.append((file_offset, pc))
+
+    if not candidates and len(already_patched) == 1:
+        _, pc = already_patched[0]
+        print(f"arm64 New Folder native input already patched at 0x{pc:x}")
+        return False
+
+    if len(candidates) != 1:
+        details = ", ".join(f"0x{pc:x}" for _, pc in candidates) or "none"
+        raise PatchError(f"Expected one New Folder input call to patch; found {details}")
+
+    call_file_offset, call_vmaddr = candidates[0]
+    data[call_file_offset : call_file_offset + 4] = MOV_W0_ZERO_ARM64
+    print(f"Patched arm64 New Folder native input call at 0x{call_vmaddr:x}")
+    return True
+
+
+def patch_arm64_slice(data: bytearray, slice_offset: int, slice_size: int) -> bool:
+    sections = parse_sections_64(data, slice_offset)
+    text_section = find_section(sections, "__text")
+
+    patched = False
+    patched = patch_xp3filter_alert(data, slice_offset, slice_size, sections, text_section) or patched
+    patched = patch_new_folder_input(data, slice_offset, slice_size, sections, text_section) or patched
+    return patched
 
 
 def main() -> int:

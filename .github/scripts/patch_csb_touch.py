@@ -44,6 +44,9 @@ PATCHES = {
         "btn_cell",
         "Panel_7",
     },
+    "ui/comctrl/CheckBoxItem.csb": {
+        "Panel_5",
+    },
 }
 
 

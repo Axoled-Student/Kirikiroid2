@@ -413,18 +413,13 @@ void TVPMainFileSelectorForm::showMenu(Ref*) {
 		});
 		reader.findWidget("btnNewFolder")->addClickEventListener([this](Ref*) {
 			ttstr name = TJS_W("New Folder");
-			std::vector<ttstr> btns;
-			btns.emplace_back("OK");
-			btns.emplace_back("Cancel");
-			if (TVPShowSimpleInputBox(name, "Input name", "", btns) == 0) {
-				ttstr newname(CurrentPath);
-				newname += TJS_W("/");
-				newname += name;
-				if (!TVPCreateFolders(newname)) {
-					TVPShowSimpleMessageBox(TJS_W("Fail to create folder."), TJS_W("Error"));
-				} else {
-					ListDir(CurrentPath);
-				}
+			ttstr newname(CurrentPath);
+			newname += TJS_W("/");
+			newname += name;
+			if (!TVPCreateFolders(newname)) {
+				TVPShowSimpleMessageBox(TJS_W("Fail to create folder."), TJS_W("Error"));
+			} else {
+				ListDir(CurrentPath);
 			}
 			hideMenu(nullptr);
 		});
