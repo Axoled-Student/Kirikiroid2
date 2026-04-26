@@ -822,8 +822,8 @@ void TVPListForm::show() {
 
 bool TVPListForm::onMaskTouchBegan(cocos2d::Touch *t, cocos2d::Event *) {
 	Rect rc;
-	rc.size = getContentSize();
-	if (rc.containsPoint(convertTouchToNodeSpace(t))) {
+	rc.size = _root->getContentSize();
+	if (!rc.containsPoint(_root->convertTouchToNodeSpace(t))) {
 		TVPMainScene::GetInstance()->popUIForm(this, TVPMainScene::eLeaveToBottom);
 		return true;
 	}

@@ -28,6 +28,9 @@ jobs:
       ARTIFACT_NAME: ${{ github.event.inputs.artifact_name }}
 
     steps:
+      - name: Check out patch scripts
+        uses: actions/checkout@v4
+
       - name: Download the .ipa file
         run: |
           set -euo pipefail
@@ -90,6 +93,16 @@ jobs:
           echo "Verification:"
           plutil -extract UIFileSharingEnabled xml1 -o - "$PLIST_PATH"
           plutil -extract UISupportsDocumentBrowser xml1 -o - "$PLIST_PATH"
+
+      - name: Patch popup selection touch handling
+        run: |
+          set -euo pipefail
+          APP_DIR="$(find Payload -type d -name '*.app' -print -quit)"
+          if [ -z "$APP_DIR" ]; then
+            echo "No .app bundle found in Payload."
+            exit 1
+          fi
+          python3 .github/scripts/patch_csb_touch.py "$APP_DIR"
 
       - name: Repackage into a new .ipa
         run: |

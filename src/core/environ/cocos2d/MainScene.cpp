@@ -1562,6 +1562,26 @@ public:
 	}
 };
 
+static bool TVPTouchHitsVisibleNodeTree(Node *node, Touch *touch) {
+	if (!node || !node->isVisible()) return false;
+
+	const Size &size = node->getContentSize();
+	if (size.width > 0 && size.height > 0) {
+		Rect bounds(0, 0, size.width, size.height);
+		if (bounds.containsPoint(node->convertTouchToNodeSpace(touch))) {
+			return true;
+		}
+	}
+
+	for (Node *child : node->getChildren()) {
+		if (TVPTouchHitsVisibleNodeTree(child, touch)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static TVPMainScene *_instance = nullptr;
 
 TVPMainScene* TVPMainScene::GetInstance() {
@@ -1652,6 +1672,16 @@ void TVPMainScene::pushUIForm(cocos2d::Node *ui, eEnterAni ani) {
 		UINode->addChild(ui);
 	} else if (ani == eEnterFromBottom) {
 		Size size = UINode->getContentSize();
+		if (!_func_mask_layer_touchbegan) {
+			setMaskLayTouchBegain([ui](Touch *touch, Event *) -> bool {
+				for (Node *child : ui->getChildren()) {
+					if (TVPTouchHitsVisibleNodeTree(child, touch)) {
+						return false;
+					}
+				}
+				return true;
+			});
+		}
 		cocos2d::Node *ColorMask = MaskLayer::create(Color4B(0, 0, 0, 0), size.width, size.height);
 		ColorMask->runAction(FadeTo::create(UI_CHANGE_DURATION, 128));
 		ui->setPositionY(-ui->getContentSize().height);
