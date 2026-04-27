@@ -215,6 +215,25 @@ def encode_bl(pc: int, target: int) -> bytes:
     return encode_branch(0x94000000, pc, target)
 
 
+def encode_adrp(register: int, pc: int, target: int) -> bytes:
+    delta = (target & ~0xFFF) - (pc & ~0xFFF)
+    if delta % 0x1000 != 0:
+        raise PatchError(f"Unaligned ADRP target: 0x{pc:x}->0x{target:x}")
+    immediate = delta // 0x1000
+    if immediate < -(1 << 20) or immediate >= (1 << 20):
+        raise PatchError(f"ADRP target out of range: 0x{pc:x}->0x{target:x}")
+    immediate &= (1 << 21) - 1
+    immlo = immediate & 0x3
+    immhi = (immediate >> 2) & 0x7FFFF
+    return struct.pack("<I", 0x90000000 | (immlo << 29) | (immhi << 5) | register)
+
+
+def encode_add_immediate(rd: int, rn: int, immediate: int) -> bytes:
+    if immediate < 0 or immediate > 0xFFF:
+        raise PatchError(f"ADD immediate out of range: 0x{immediate:x}")
+    return struct.pack("<I", 0x91000000 | (immediate << 10) | (rn << 5) | rd)
+
+
 def find_alert_string_xrefs(data: bytes | bytearray, slice_offset: int, text_section, target_vmaddr: int):
     text_start = slice_offset + text_section["file_offset"]
     text_end = text_start + text_section["size"]
@@ -486,6 +505,111 @@ def patch_file_item_touch_ended(data: bytearray, slice_offset: int, sections, te
     return True
 
 
+def patch_dynamic_app_path(data: bytearray, slice_offset: int, sections, text_section) -> bool:
+    # The upstream IPA caches TVPGetAppPath() in a static local. If the file
+    # selector calls it before a game starts, patch.tjs/xp3filter.tjs are later
+    # searched in the wrong directory. Recompute from TVPProjectDir each time.
+    text_start = slice_offset + text_section["file_offset"]
+    text_end = text_start + text_section["size"]
+    text_vmaddr = text_section["address"]
+
+    prologue = [
+        0xA9BE4FF4,  # stp x20, x19, [sp, #-0x20]!
+        0xA9017BFD,  # stp x29, x30, [sp, #0x10]
+        0x910043FD,  # add x29, sp, #0x10
+        0xAA0803F3,  # mov x19, x8
+    ]
+    mov_x8_x19 = struct.pack("<I", 0xAA1303E8)
+
+    candidates = []
+    already_patched = []
+    for file_offset in range(text_start, text_end - 0x90, 4):
+        if [read_u32le(data, file_offset + i * 4) for i in range(4)] != prologue:
+            continue
+
+        func_vmaddr = text_vmaddr + (file_offset - text_start)
+        patch_file_offset = file_offset + 0x10
+        patch_vmaddr = func_vmaddr + 0x10
+        epilogue_vmaddr = func_vmaddr + 0x8C
+
+        first = read_u32le(data, patch_file_offset)
+        second = read_u32le(data, patch_file_offset + 4)
+        third = bytes(data[patch_file_offset + 8 : patch_file_offset + 12])
+        fourth = read_u32le(data, patch_file_offset + 12)
+        fifth = read_u32le(data, patch_file_offset + 16)
+
+        # Already patched form:
+        #   adrp x0, TVPProjectDir@PAGE
+        #   add  x0, x0, TVPProjectDir@PAGEOFF
+        #   mov  x8, x19
+        #   bl   TVPExtractStoragePath
+        #   b    epilogue
+        already_target = decode_adrp_target(first, patch_vmaddr)
+        if (
+            already_target
+            and already_target[0] == 0
+            and is_add_same_register_immediate(second, 0, (second >> 10) & 0xFFF)
+            and third == mov_x8_x19
+            and fourth & 0xFC000000 == 0x94000000
+            and fifth & 0xFC000000 == 0x14000000
+        ):
+            branch_target = patch_vmaddr + 16 + sign_extend(fifth & 0x03FFFFFF, 26) * 4
+            if branch_target == epilogue_vmaddr:
+                already_patched.append((patch_vmaddr, func_vmaddr))
+            continue
+
+        # Original cached form starts with the static guard check. The useful
+        # dynamic call target and TVPProjectDir address are still in the lazy
+        # initialization block a few instructions later.
+        if not decode_adrp_target(first, patch_vmaddr):
+            continue
+        if read_u32le(data, patch_file_offset + 8) != 0x08DFFD08:  # ldarb w8, [x8]
+            continue
+        if read_u32le(data, patch_file_offset + 12) != 0x37000288:  # tbnz w8, #0, ...
+            continue
+
+        project_adrp = read_u32le(data, file_offset + 0x38)
+        project_add = read_u32le(data, file_offset + 0x3C)
+        extract_call = read_u32le(data, file_offset + 0x40)
+        decoded_project = decode_adrp_target(project_adrp, func_vmaddr + 0x38)
+        if not decoded_project or decoded_project[0] != 0:
+            continue
+        if project_add & 0xFFC00000 != 0x91000000:
+            continue
+        project_rd = project_add & 0x1F
+        project_rn = (project_add >> 5) & 0x1F
+        project_pageoff = (project_add >> 10) & 0xFFF
+        if project_rd != 0 or project_rn != 0 or ((project_add >> 22) & 0x1):
+            continue
+        if extract_call & 0xFC000000 != 0x94000000:
+            continue
+
+        project_vmaddr = decoded_project[1] + project_pageoff
+        extract_vmaddr = (func_vmaddr + 0x40) + sign_extend(extract_call & 0x03FFFFFF, 26) * 4
+        candidates.append((patch_file_offset, patch_vmaddr, func_vmaddr, epilogue_vmaddr, project_vmaddr, extract_vmaddr))
+
+    if not candidates and len(already_patched) == 1:
+        patch_vmaddr, func_vmaddr = already_patched[0]
+        print(f"arm64 dynamic TVPGetAppPath already patched at 0x{func_vmaddr:x} via 0x{patch_vmaddr:x}")
+        return False
+
+    if len(candidates) != 1:
+        details = ", ".join(f"0x{func_vmaddr:x}" for _, _, func_vmaddr, _, _, _ in candidates) or "none"
+        raise PatchError(f"Expected one TVPGetAppPath cache site to patch; found {details}")
+
+    patch_file_offset, patch_vmaddr, func_vmaddr, epilogue_vmaddr, project_vmaddr, extract_vmaddr = candidates[0]
+    patched_block = (
+        encode_adrp(0, patch_vmaddr, project_vmaddr)
+        + encode_add_immediate(0, 0, project_vmaddr & 0xFFF)
+        + mov_x8_x19
+        + encode_bl(patch_vmaddr + 12, extract_vmaddr)
+        + encode_b(patch_vmaddr + 16, epilogue_vmaddr)
+    )
+    data[patch_file_offset : patch_file_offset + len(patched_block)] = patched_block
+    print(f"Patched arm64 dynamic TVPGetAppPath at 0x{func_vmaddr:x}")
+    return True
+
+
 def patch_delete_confirmation(data: bytearray, slice_offset: int, slice_size: int, sections, text_section) -> bool:
     key_offset = bytes(data).find(DELETE_CONFIRM_KEY, slice_offset, slice_offset + slice_size)
     if key_offset < 0:
@@ -541,6 +665,7 @@ def patch_arm64_slice(data: bytearray, slice_offset: int, slice_size: int) -> bo
     patched = patch_new_folder_input(data, slice_offset, slice_size, sections, text_section) or patched
     patched = patch_file_item_click_guard(data, slice_offset, slice_size, sections, text_section) or patched
     patched = patch_file_item_touch_ended(data, slice_offset, sections, text_section) or patched
+    patched = patch_dynamic_app_path(data, slice_offset, sections, text_section) or patched
     patched = patch_delete_confirmation(data, slice_offset, slice_size, sections, text_section) or patched
     return patched
 
